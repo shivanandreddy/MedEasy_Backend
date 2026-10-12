@@ -1,430 +1,623 @@
-import  pool  from "../../config/db.js";
 
-// Create Doctor Profile
+import pool from "../../config/db.js";
+import ApiResponse from "../../utils/ApiResponse.js";
+import ApiError from "../../utils/ApiError.js";
+
+// --------------------------------------------------
+// SHARED ERROR HANDLER
+// --------------------------------------------------
+const handleControllerError = (res, error, operation) => {
+  if (error instanceof ApiError) {
+    return res.status(error.statusCode).json({
+      success: false,
+      statusCode: error.statusCode,
+      message: error.message,
+    });
+  }
+
+  if (error.code === "23505") {
+    return res.status(409).json({
+      success: false,
+      statusCode: 409,
+      message: "A doctor with this code or registration number already exists.",
+    });
+  }
+
+  if (error.code === "23503") {
+    return res.status(400).json({
+      success: false,
+      statusCode: 400,
+      message: "The referenced user or record does not exist.",
+    });
+  }
+
+  if (error.code === "22P02") {
+    return res.status(400).json({
+      success: false,
+      statusCode: 400,
+      message: "Invalid ID or field value.",
+    });
+  }
+
+  console.error(`${operation}:`, error);
+
+  return res.status(500).json({
+    success: false,
+    statusCode: 500,
+    message: `${operation} failed.`,
+  });
+};
+
+// --------------------------------------------------
+// CREATE DOCTOR PROFILE
+// POST /api/doctors
+// A doctor user must already exist in users.
+// --------------------------------------------------
 export const createDoctor = async (req, res) => {
-    try {
-        const {
-            user_id,
-            doctor_code,
-            qualification,
-            specialization,
-            medical_registration_number,
-            experience_years,
-            consultation_fee
-        } = req.body;
+  try {
+    const {
+      user_id,
+      doctor_code,
+      qualification,
+      specialization,
+      medical_registration_number,
+      experience_years = 0,
+      consultation_fee = 0,
+      status = true,
+    } = req.body;
 
-        // 1. Validate required fields
-        if (!user_id || !doctor_code) {
-            return res.status(400).json({
-                success: false,
-                message: "user_id and doctor_code are required"
-            });
-        }
-
-        // 2. Check user exists and is a doctor
-        const userResult = await pool.query(
-            `SELECT
-                id,
-                hospital_id,
-                name,
-                email,
-                role,
-                department,
-                status
-             FROM users
-             WHERE id = $1`,
-            [user_id]
-        );
-
-        if (userResult.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                message: "User not found"
-            });
-        }
-
-        const user = userResult.rows[0];
-
-        // 3. Make sure the user has doctor role
-        if (user.role !== "doctor") {
-            return res.status(400).json({
-                success: false,
-                message: "Selected user is not a doctor"
-            });
-        }
-
-        // 4. Check whether doctor profile already exists
-        const existingDoctor = await pool.query(
-            `SELECT id
-             FROM doctors
-             WHERE user_id = $1
-                OR doctor_code = $2`,
-            [user_id, doctor_code]
-        );
-
-        if (existingDoctor.rows.length > 0) {
-            return res.status(409).json({
-                success: false,
-                message: "Doctor profile already exists"
-            });
-        }
-
-        // 5. Create doctor profile
-        const result = await pool.query(
-            `INSERT INTO doctors (
-                user_id,
-                doctor_code,
-                qualification,
-                specialization,
-                medical_registration_number,
-                experience_years,
-                consultation_fee
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING *`,
-            [
-                user_id,
-                doctor_code,
-                qualification || null,
-                specialization || null,
-                medical_registration_number || null,
-                experience_years || 0,
-                consultation_fee || 0
-            ]
-        );
-
-        res.status(201).json({
-            success: true,
-            message: "Doctor created successfully",
-            doctor: result.rows[0]
-        });
-
-    } catch (error) {
-        console.error("Create doctor error:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Failed to create doctor",
-            error: error.message
-        });
+    if (
+      !user_id ||
+      typeof doctor_code !== "string" ||
+      !doctor_code.trim()
+    ) {
+      throw new ApiError(
+        400,
+        "User ID and doctor code are required."
+      );
     }
+
+    if (
+      !Number.isFinite(Number(experience_years)) ||
+      Number(experience_years) < 0
+    ) {
+      throw new ApiError(
+        400,
+        "Experience years must be a non-negative number."
+      );
+    }
+
+    if (
+      !Number.isFinite(Number(consultation_fee)) ||
+      Number(consultation_fee) < 0
+    ) {
+      throw new ApiError(
+        400,
+        "Consultation fee must be a non-negative number."
+      );
+    }
+
+    if (typeof status !== "boolean") {
+      throw new ApiError(
+        400,
+        "Status must be true or false."
+      );
+    }
+
+    // Verify that the user exists and has the doctor role.
+    const userResult = await pool.query(
+      `SELECT id, hospital_id, role
+       FROM users
+       WHERE id = $1`,
+      [user_id]
+    );
+
+    if (userResult.rows.length === 0) {
+      throw new ApiError(404, "Doctor user account not found.");
+    }
+
+    if (userResult.rows[0].role !== "doctor") {
+      throw new ApiError(
+        400,
+        "The selected user must have the doctor role."
+      );
+    }
+
+    // Prevent creating another profile for the same user.
+    const existingProfile = await pool.query(
+      `SELECT id
+       FROM doctors
+       WHERE user_id = $1`,
+      [user_id]
+    );
+
+    if (existingProfile.rows.length > 0) {
+      throw new ApiError(
+        409,
+        "A doctor profile already exists for this user."
+      );
+    }
+
+    const result = await pool.query(
+      `INSERT INTO doctors (
+        user_id,
+        doctor_code,
+        qualification,
+        specialization,
+        medical_registration_number,
+        experience_years,
+        consultation_fee,
+        status
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING *`,
+      [
+        user_id,
+        doctor_code.trim().toUpperCase(),
+        qualification?.trim() || null,
+        specialization?.trim() || null,
+        medical_registration_number?.trim() || null,
+        Number(experience_years),
+        Number(consultation_fee),
+        status,
+      ]
+    );
+
+    return res.status(201).json(
+      new ApiResponse(
+        201,
+        "Doctor profile created successfully.",
+        result.rows[0]
+      )
+    );
+  } catch (error) {
+    return handleControllerError(
+      res,
+      error,
+      "Create doctor"
+    );
+  }
 };
 
-// Get All Doctors
+// --------------------------------------------------
+// GET ALL DOCTORS
+// GET /api/doctors
+// --------------------------------------------------
 export const getDoctors = async (req, res) => {
-    try {
-        const result = await pool.query(
-            `SELECT
-                d.id,
-                d.user_id,
-                d.doctor_code,
-                d.qualification,
-                d.specialization,
-                d.medical_registration_number,
-                d.experience_years,
-                d.consultation_fee,
-                d.status,
-                d.created_at,
-                d.updated_at,
+  try {
+    const result = await pool.query(
+      `SELECT
+         d.*,
+         u.name,
+         u.email,
+         u.phone,
+         u.role,
+         u.status AS user_status,
+         u.hospital_id,
+         h.name AS hospital_name,
+         u.department_id,
+         dep.name AS department_name,
+         dep.code AS department_code
+       FROM doctors d
+       INNER JOIN users u
+         ON u.id = d.user_id
+       LEFT JOIN hospitals h
+         ON h.id = u.hospital_id
+       LEFT JOIN departments dep
+         ON dep.id = u.department_id
+        AND dep.hospital_id = u.hospital_id
+       ORDER BY d.created_at DESC`
+    );
 
-                u.name,
-                u.email,
-                u.phone,
-                u.role,
-                u.department,
-                u.hospital_id
-
-             FROM doctors d
-
-             INNER JOIN users u
-                ON d.user_id = u.id
-
-             ORDER BY d.created_at DESC`
-        );
-
-        res.status(200).json({
-            count: result.rows.length,
-            doctors: result.rows
-        });
-
-    } catch (error) {
-        console.error("Get doctors error:", error);
-
-        res.status(500).json({
-            message: "Failed to fetch doctors",
-            error: error.message
-        });
-    }
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        "Doctors fetched successfully.",
+        {
+          count: result.rows.length,
+          doctors: result.rows,
+        }
+      )
+    );
+  } catch (error) {
+    return handleControllerError(
+      res,
+      error,
+      "Get doctors"
+    );
+  }
 };
 
-
-// Get Doctor By ID
+// --------------------------------------------------
+// GET DOCTOR BY ID
+// GET /api/doctors/:id
+// :id is the doctors table profile ID.
+// --------------------------------------------------
 export const getDoctorById = async (req, res) => {
-    try {
-        const { id } = req.params;
+  try {
+    const { id } = req.params;
 
-        const result = await pool.query(
-            `SELECT
-                d.id,
-                d.user_id,
-                d.doctor_code,
-                d.qualification,
-                d.specialization,
-                d.medical_registration_number,
-                d.experience_years,
-                d.consultation_fee,
-                d.status,
-                d.created_at,
-                d.updated_at,
+    const result = await pool.query(
+      `SELECT
+         d.*,
+         u.name,
+         u.email,
+         u.phone,
+         u.role,
+         u.status AS user_status,
+         u.hospital_id,
+         h.name AS hospital_name,
+         u.department_id,
+         dep.name AS department_name,
+         dep.code AS department_code
+       FROM doctors d
+       INNER JOIN users u
+         ON u.id = d.user_id
+       LEFT JOIN hospitals h
+         ON h.id = u.hospital_id
+       LEFT JOIN departments dep
+         ON dep.id = u.department_id
+        AND dep.hospital_id = u.hospital_id
+       WHERE d.id = $1`,
+      [id]
+    );
 
-                u.name,
-                u.email,
-                u.phone_number,
-                u.user_role,
-                u.department_type,
-                u.hospital_id
-
-             FROM doctors d
-
-             INNER JOIN users u
-                ON d.user_id = u.id
-
-             WHERE d.id = $1`,
-            [id]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({
-                message: "Doctor not found"
-            });
-        }
-
-        res.status(200).json({
-            doctor: result.rows[0]
-        });
-
-    } catch (error) {
-        console.error("Get doctor error:", error);
-
-        res.status(500).json({
-            message: "Failed to fetch doctor",
-            error: error.message
-        });
+    if (result.rows.length === 0) {
+      throw new ApiError(404, "Doctor not found.");
     }
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        "Doctor fetched successfully.",
+        result.rows[0]
+      )
+    );
+  } catch (error) {
+    return handleControllerError(
+      res,
+      error,
+      "Get doctor"
+    );
+  }
 };
 
-
-// Get Doctors By Hospital
+// --------------------------------------------------
+// GET DOCTORS BY HOSPITAL
+// GET /api/doctors/hospital/:hospitalId
+// --------------------------------------------------
 export const getDoctorsByHospital = async (req, res) => {
-    try {
-        const { hospital_id } = req.params;
+  try {
+    const { hospitalId } = req.params;
 
-        const result = await pool.query(
-            `SELECT
-                d.id,
-                d.user_id,
-                d.doctor_code,
-                d.qualification,
-                d.specialization,
-                d.medical_registration_number,
-                d.experience_years,
-                d.consultation_fee,
-                d.status,
-                d.created_at,
-                d.updated_at,
+    const result = await pool.query(
+      `SELECT
+         d.*,
+         u.name,
+         u.email,
+         u.phone,
+         u.status AS user_status,
+         u.hospital_id,
+         h.name AS hospital_name,
+         u.department_id,
+         dep.name AS department_name,
+         dep.code AS department_code
+       FROM doctors d
+       INNER JOIN users u
+         ON u.id = d.user_id
+       LEFT JOIN hospitals h
+         ON h.id = u.hospital_id
+       LEFT JOIN departments dep
+         ON dep.id = u.department_id
+        AND dep.hospital_id = u.hospital_id
+       WHERE u.hospital_id = $1
+       ORDER BY u.name ASC`,
+      [hospitalId]
+    );
 
-                u.name,
-                u.email,
-                u.phone_number,
-                u.user_role,
-                u.department_type,
-                u.hospital_id
-
-             FROM doctors d
-
-             INNER JOIN users u
-                ON d.user_id = u.id
-
-             WHERE u.hospital_id = $1
-
-             ORDER BY d.created_at DESC`,
-            [hospital_id]
-        );
-
-        res.status(200).json({
-            count: result.rows.length,
-            doctors: result.rows
-        });
-
-    } catch (error) {
-        console.error("Get hospital doctors error:", error);
-
-        res.status(500).json({
-            message: "Failed to fetch hospital doctors",
-            error: error.message
-        });
-    }
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        "Hospital doctors fetched successfully.",
+        {
+          count: result.rows.length,
+          doctors: result.rows,
+        }
+      )
+    );
+  } catch (error) {
+    return handleControllerError(
+      res,
+      error,
+      "Get doctors by hospital"
+    );
+  }
 };
 
-//Get Doctors By Hospital and Department
-export const getDoctorsByHospitalAndDepartment = async (req, res) => {
-    try {
-        const { hospital_id, department } = req.params;
+// --------------------------------------------------
+// GET DOCTORS BY HOSPITAL AND DEPARTMENT
+// GET /api/doctors/hospital/:hospitalId/department/:departmentId
+// --------------------------------------------------
+export const getDoctorsByHospitalAndDepartment = async (
+  req,
+  res
+) => {
+  try {
+    const { hospitalId, departmentId } = req.params;
 
-        const result = await pool.query(`SELECT * FROM doctors WHERE hospital_id = $1 AND department = $2 ORDER BY created_at DESC`, [hospital_id, department]);
-        res.status(200).json({
-            count: result.rows.length,
-            doctors: result.rows
-        });
-    } catch (error) {
-        console.error("Get hospital doctors error:", error);
+    const result = await pool.query(
+      `SELECT
+         d.*,
+         u.name,
+         u.email,
+         u.phone,
+         u.status AS user_status,
+         u.hospital_id,
+         h.name AS hospital_name,
+         u.department_id,
+         dep.name AS department_name,
+         dep.code AS department_code
+       FROM doctors d
+       INNER JOIN users u
+         ON u.id = d.user_id
+       INNER JOIN departments dep
+         ON dep.id = u.department_id
+        AND dep.hospital_id = u.hospital_id
+       LEFT JOIN hospitals h
+         ON h.id = u.hospital_id
+       WHERE u.hospital_id = $1
+         AND u.department_id = $2
+       ORDER BY u.name ASC`,
+      [hospitalId, departmentId]
+    );
 
-        res.status(500).json({
-            message: "Failed to fetch hospital doctors",
-            error: error.message
-        });
-    }
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        "Department doctors fetched successfully.",
+        {
+          count: result.rows.length,
+          doctors: result.rows,
+        }
+      )
+    );
+  } catch (error) {
+    return handleControllerError(
+      res,
+      error,
+      "Get doctors by department"
+    );
+  }
 };
 
-
-// Update Doctor
+// --------------------------------------------------
+// UPDATE DOCTOR PROFILE
+// PUT /api/doctors/:id
+// --------------------------------------------------
 export const updateDoctor = async (req, res) => {
-    try {
-        const { id } = req.params;
+  try {
+    const { id } = req.params;
 
-        const {
-            doctor_code,
-            qualification,
-            specialization,
-            medical_registration_number,
-            experience_years,
-            consultation_fee
-        } = req.body;
+    const {
+      doctor_code,
+      qualification,
+      specialization,
+      medical_registration_number,
+      experience_years,
+      consultation_fee,
+      status,
+    } = req.body;
 
-        const result = await pool.query(
-            `UPDATE doctors
-             SET
-                doctor_code = COALESCE($1, doctor_code),
-                qualification = COALESCE($2, qualification),
-                specialization = COALESCE($3, specialization),
-                medical_registration_number =
-                    COALESCE($4, medical_registration_number),
-                experience_years = COALESCE($5, experience_years),
-                consultation_fee = COALESCE($6, consultation_fee),
-                updated_at = CURRENT_TIMESTAMP
+    const allowedFields = [
+      "doctor_code",
+      "qualification",
+      "specialization",
+      "medical_registration_number",
+      "experience_years",
+      "consultation_fee",
+      "status",
+    ];
 
-             WHERE id = $7
+    const hasUpdate = allowedFields.some(
+      (field) => req.body[field] !== undefined
+    );
 
-             RETURNING *`,
-            [
-                doctor_code,
-                qualification,
-                specialization,
-                medical_registration_number,
-                experience_years,
-                consultation_fee,
-                id
-            ]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({
-                message: "Doctor not found"
-            });
-        }
-
-        res.status(200).json({
-            message: "Doctor updated successfully",
-            doctor: result.rows[0]
-        });
-
-    } catch (error) {
-        console.error("Update doctor error:", error);
-
-        res.status(500).json({
-            message: "Failed to update doctor",
-            error: error.message
-        });
+    if (!hasUpdate) {
+      throw new ApiError(
+        400,
+        "Provide at least one field to update."
+      );
     }
+
+    if (
+      doctor_code !== undefined &&
+      (typeof doctor_code !== "string" || !doctor_code.trim())
+    ) {
+      throw new ApiError(
+        400,
+        "Doctor code cannot be empty."
+      );
+    }
+
+    if (
+      experience_years !== undefined &&
+      (!Number.isFinite(Number(experience_years)) ||
+        Number(experience_years) < 0)
+    ) {
+      throw new ApiError(
+        400,
+        "Experience years must be a non-negative number."
+      );
+    }
+
+    if (
+      consultation_fee !== undefined &&
+      (!Number.isFinite(Number(consultation_fee)) ||
+        Number(consultation_fee) < 0)
+    ) {
+      throw new ApiError(
+        400,
+        "Consultation fee must be a non-negative number."
+      );
+    }
+
+    if (
+      status !== undefined &&
+      typeof status !== "boolean"
+    ) {
+      throw new ApiError(
+        400,
+        "Status must be true or false."
+      );
+    }
+
+    const result = await pool.query(
+      `UPDATE doctors
+       SET
+         doctor_code = COALESCE($1, doctor_code),
+         qualification = CASE
+           WHEN $2::boolean THEN $3
+           ELSE qualification
+         END,
+         specialization = CASE
+           WHEN $4::boolean THEN $5
+           ELSE specialization
+         END,
+         medical_registration_number = CASE
+           WHEN $6::boolean THEN $7
+           ELSE medical_registration_number
+         END,
+         experience_years = COALESCE($8, experience_years),
+         consultation_fee = COALESCE($9, consultation_fee),
+         status = COALESCE($10, status),
+         updated_at = CURRENT_TIMESTAMP
+       WHERE id = $11
+       RETURNING *`,
+      [
+        doctor_code === undefined
+          ? null
+          : doctor_code.trim().toUpperCase(),
+        qualification !== undefined,
+        qualification === undefined
+          ? null
+          : qualification?.trim() || null,
+        specialization !== undefined,
+        specialization === undefined
+          ? null
+          : specialization?.trim() || null,
+        medical_registration_number !== undefined,
+        medical_registration_number === undefined
+          ? null
+          : medical_registration_number?.trim() || null,
+        experience_years === undefined
+          ? null
+          : Number(experience_years),
+        consultation_fee === undefined
+          ? null
+          : Number(consultation_fee),
+        status ?? null,
+        id,
+      ]
+    );
+
+    if (result.rows.length === 0) {
+      throw new ApiError(404, "Doctor not found.");
+    }
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        "Doctor updated successfully.",
+        result.rows[0]
+      )
+    );
+  } catch (error) {
+    return handleControllerError(
+      res,
+      error,
+      "Update doctor"
+    );
+  }
 };
 
-
-// Activate / Deactivate Doctor
+// --------------------------------------------------
+// UPDATE DOCTOR STATUS
+// PATCH /api/doctors/:id/status
+// Body: { "status": false }
+// --------------------------------------------------
 export const updateDoctorStatus = async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { status } = req.body;
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
 
-        if (typeof status !== "boolean") {
-            return res.status(400).json({
-                message: "status must be true or false"
-            });
-        }
-
-        const result = await pool.query(
-            `UPDATE doctors
-             SET
-                status = $1,
-                updated_at = CURRENT_TIMESTAMP
-
-             WHERE id = $2
-
-             RETURNING *`,
-            [status, id]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({
-                message: "Doctor not found"
-            });
-        }
-
-        res.status(200).json({
-            message: status
-                ? "Doctor activated successfully"
-                : "Doctor deactivated successfully",
-            doctor: result.rows[0]
-        });
-
-    } catch (error) {
-        console.error("Update doctor status error:", error);
-
-        res.status(500).json({
-            message: "Failed to update doctor status",
-            error: error.message
-        });
+    if (typeof status !== "boolean") {
+      throw new ApiError(
+        400,
+        "Status must be true or false."
+      );
     }
+
+    const result = await pool.query(
+      `UPDATE doctors
+       SET status = $1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $2
+       RETURNING *`,
+      [status, id]
+    );
+
+    if (result.rows.length === 0) {
+      throw new ApiError(404, "Doctor not found.");
+    }
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        "Doctor status updated successfully.",
+        result.rows[0]
+      )
+    );
+  } catch (error) {
+    return handleControllerError(
+      res,
+      error,
+      "Update doctor status"
+    );
+  }
 };
 
-
-// Delete Doctor Profile
+// --------------------------------------------------
+// DELETE DOCTOR PROFILE
+// DELETE /api/doctors/:id
+// This does not delete the linked users record.
+// --------------------------------------------------
 export const deleteDoctor = async (req, res) => {
-    try {
-        const { id } = req.params;
+  try {
+    const { id } = req.params;
 
-        const result = await pool.query(
-            `DELETE FROM doctors
-             WHERE id = $1
-             RETURNING id`,
-            [id]
-        );
+    const result = await pool.query(
+      `DELETE FROM doctors
+       WHERE id = $1
+       RETURNING id, user_id, doctor_code`,
+      [id]
+    );
 
-        if (result.rows.length === 0) {
-            return res.status(404).json({
-                message: "Doctor not found"
-            });
-        }
-
-        res.status(200).json({
-            message: "Doctor profile deleted successfully"
-        });
-
-    } catch (error) {
-        console.error("Delete doctor error:", error);
-
-        res.status(500).json({
-            message: "Failed to delete doctor",
-            error: error.message
-        });
+    if (result.rows.length === 0) {
+      throw new ApiError(404, "Doctor not found.");
     }
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        "Doctor profile deleted successfully.",
+        result.rows[0]
+      )
+    );
+  } catch (error) {
+    return handleControllerError(
+      res,
+      error,
+      "Delete doctor"
+    );
+  }
 };

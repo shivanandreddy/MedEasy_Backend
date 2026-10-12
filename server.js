@@ -4,6 +4,7 @@ import morgan from "morgan";
 import authRoutes from "./modules/auth/auth.routes.js";
 import organizationRoutes from "./modules/organization/organization.routes.js";
 import hospitalRoutes from "./modules/hospital/hospital.routes.js";
+import departmentRoutes from "./modules/departments/department.routes.js";
 import doctorRoutes from "./modules/doctor/doctor.routes.js";
 
 const app = express();
@@ -21,6 +22,7 @@ app.get("/health", (req, res) => {
 app.use("/api/auth", authRoutes);
 app.use("/api/organizations", organizationRoutes);
 app.use("/api/hospitals", hospitalRoutes);
+app.use("/api/departments",departmentRoutes);
 app.use("/api/doctors", doctorRoutes);
 
 

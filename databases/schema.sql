@@ -94,3 +94,43 @@ CREATE TABLE doctors (
         REFERENCES users(id)
         ON DELETE CASCADE
 );
+
+
+-- EZO MED: Departments master table
+
+CREATE TABLE IF NOT EXISTS departments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    hospital_id UUID NOT NULL,
+
+    name VARCHAR(150) NOT NULL,
+    code VARCHAR(50) NOT NULL,
+    description TEXT,
+
+    status VARCHAR(10) NOT NULL DEFAULT 'ACTIVE'
+        CHECK (status IN ('ACTIVE', 'INACTIVE')),
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT fk_departments_hospital
+        FOREIGN KEY (hospital_id)
+        REFERENCES hospitals(id)
+        ON DELETE RESTRICT,
+
+    CONSTRAINT uq_departments_hospital_code
+        UNIQUE (hospital_id, code),
+
+    CONSTRAINT uq_departments_hospital_name
+        UNIQUE (hospital_id, name),
+
+    CONSTRAINT uq_departments_hospital_id
+        UNIQUE (hospital_id, id)
+);
+
+-- Improve department lookups by hospital
+CREATE INDEX IF NOT EXISTS idx_departments_hospital
+    ON departments(hospital_id);
+
+CREATE INDEX IF NOT EXISTS idx_departments_status
+    ON departments(hospital_id, status);
